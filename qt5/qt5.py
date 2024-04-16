@@ -9,16 +9,15 @@ from avix_msg.msg import GimbalInfo, TrackingUpdate
 import matplotlib.pyplot as plt
 import numpy as np
 
-class RosSubscriberApp(QWidget, Node):
+class RosSubscriberApp(QWidget):
     def __init__(self):
-        super().__init__(node_name="ros_subscriber")
-        QWidget.__init__(self)
+        super().__init__()
+        self.rosnode = Node("ros_qt5")
+        self.rosnode.create_subscription(GimbalInfo, '/gimbal/info', self.listener_callback, 10)
+        self.rosnode.create_subscription(TrackingUpdate, '/object_detection/target_deviation', self.deviation_callback, 10)
 
-        self.create_subscription(GimbalInfo, '/gimbal/info', self.listener_callback, 10)
-        self.create_subscription(TrackingUpdate, '/object_detection/target_deviation', self.deviation_callback, 10)
-
-        self.tracking_cmd_publisher = self.create_publisher(Bool, '/icp_interface/tracking_cmd', 10)
-        self.following_cmd_publisher = self.create_publisher(Int32, '/icp_interface/following_cmd', 10)
+        self.tracking_cmd_publisher = self.rosnode.create_publisher(Bool, '/icp_interface/tracking_cmd', 10)
+        self.following_cmd_publisher = self.rosnode.create_publisher(Int32, '/icp_interface/following_cmd', 10)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.timer_callback)
@@ -26,14 +25,14 @@ class RosSubscriberApp(QWidget, Node):
         
         self.init_ui()
 
-        plt.ion()
+        plt.ioff()
         plt.figure(1)
         self.t, self.mx, self.my = [], [], []
         self.count = 0
         self.plot_initialized = False
 
     def timer_callback(self):
-        rclpy.spin_once(self, timeout_sec=0.1)
+        rclpy.spin_once(self.rosnode, timeout_sec=0.1)
 
     def deviation_callback(self, msg):
         if self.plot_initialized:
@@ -72,7 +71,7 @@ class RosSubscriberApp(QWidget, Node):
         self.checkBox = QCheckBox('Plot Graph')
         layout.addWidget(self.checkBox)
         self.checkBox.stateChanged.connect(self.checkBox_changed)
-
+        #self.checkBox.setChecked(True)
         self.setLayout(layout)
 
     def checkBox_changed(self, state):
@@ -86,6 +85,7 @@ class RosSubscriberApp(QWidget, Node):
         msg = Bool()
         msg.data = True
         self.tracking_cmd_publisher.publish(msg)
+        print(f"TRACK STARTED {msg.data}")
 
     def publish_id(self):
         try:
@@ -93,6 +93,7 @@ class RosSubscriberApp(QWidget, Node):
             msg = Int32()
             msg.data = id_info
             self.following_cmd_publisher.publish(msg)
+            print(f"ID PUBLISH {id_info}")
         except ValueError:
             print("Invalid input for ID. Please enter a valid integer.")
 
@@ -102,6 +103,7 @@ def main(args=None):
     app_instance = RosSubscriberApp()
     app_instance.show()
     exit_code = app.exec_()
+    app_instance.rosnode.destroy_node()
     rclpy.shutdown()
     sys.exit(exit_code)
 
