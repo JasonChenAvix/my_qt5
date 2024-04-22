@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
         'qt5 =qt5.qt5:main'
+        'gtk3 = qt5.gtk3:main'
         ],
     },
 )
