@@ -23,6 +23,7 @@ setup(
         'qt5 =qt5.qt5:main',
         'gtk3 = qt5.gtk3:main',
         'test_gtk3 = qt5.gtk3_test:main',
+        'v1 = qt5.gtk3_testv1:main',
 
         ],
     },

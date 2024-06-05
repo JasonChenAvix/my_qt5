@@ -148,7 +148,7 @@ class MessageWindow(QWidget):
         
         
     def timer_callback(self):
-        rclpy.spin_once(self.node, timeout_sec=1)
+        rclpy.spin_once(self.node, timeout_sec=0.1)
         
         
 
@@ -167,14 +167,12 @@ class MessageWindow(QWidget):
         self.count=0
 
     def fetch_message(self):
-        if self.init_fetch:
-            self.timer.start(500)
-            self.init_fetch==False
-        else:
+        if self.timer.isActive():
             self.timer.stop()
-            self.label.setText('Stop fetch data')
-            self.init_fetch=True
-
+            self.fetch_button.setText('Start')
+        else:
+            self.timer.start(100)
+            self.fetch_button.setText('Stop')
         
     def ChangeTopic(self):
         self.topic_count += 1 
@@ -201,7 +199,10 @@ class MessageWindow(QWidget):
                             estimate_status :{msg.estimate_status},
                             estimate_source :{msg.estimate_source},
                             heading :{msg.heading},
+                            delta_north : {msg.delta_north}
+                            delta_east : {msg.delta_east}
                             ''')
+            self.label.setText(self.sendmsg)
 
 
     def gps_mavlink_callback(self , msg ):
