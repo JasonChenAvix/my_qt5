@@ -8,6 +8,7 @@ from rclpy.node import Node
 from std_msgs.msg import String ,Bool , Int32 
 from sensor_msgs.msg import Image
 from avix_msg.msg import GimbalInfo ,TrackingUpdate , InfInfo ,GimbalControl, MavlinkState, ObjectDetections,  FollowCommand, TargetGPS 
+import pandas as pd 
 
 #plot graph
 import matplotlib.pyplot as plt
@@ -19,7 +20,7 @@ import cv2
 from PyQt5.QtGui import QImage, QPixmap
 from cv_bridge import CvBridge, CvBridgeError
 
-#for gtk3
+#for plot the pid image 
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GObject
@@ -38,46 +39,66 @@ class FollowWindow(QWidget):
         self.node.create_subscription(MavlinkState, 'avix_mavros/state', self.gps_mavlink_callback, 10)
         self.node.create_subscription(InfInfo, '/inf_interface/info', self.gps_inf_callback, 10)
         self.node.create_subscription(GimbalControl, '/ktg_gimbal/control', self.controlGimbal, 10)
-        # self.node.create_subscription(ObjectDetections, '/object_detection/detections', self.detections_callback, 10)
         self.node.create_subscription(FollowCommand, '/avix_mavros/follow_command', self.follow_command_callback, 10)
         self.node.create_subscription(TargetGPS, '/object_detection/target_gps', self.target_GPS_callback, 10)
+        
         #  create image show 
         self.image_subscriber = self.node.create_subscription(Image, '/for_qt5', self.image_callback, 10)
+        self.image_subscriber = self.node.create_subscription(Image, '/ktg_gimbal/image_raw', self.video_callback, 10)
 
         #create the publisher
         self.follow_publisher = self.node.create_publisher(Bool, '/mq3/start_following', 10)
         self.track_start_publisher = self.node.create_publisher(Bool, '/icp_interface/tracking_cmd', 10)
         self.id_publisher = self.node.create_publisher(Int32, '/icp_interface/following_cmd', 10)
 
-
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.timer_callback)
         self.sendmsg = "initialize!!!"
         self.init_ui()
 
+        # Initialize CV bridge
+        self.bridge = CvBridge()
+        self.video_num=1
+        self.fps= 10.0
+        
+        # record data init
+        self.video_data=[]
+        self.yolo_data=[]
+        self.botsort_data=[]
+        self.avix_data=[]
+        self.target_data=[]
+        self.gimbal_data=[]
+        self.filename=1
+        self.video_init= True
+        self.timestamp=0
 
+    #UI interface layout
     def init_ui(self):
         self.setWindowTitle('Follow Window')
         
         layout=QHBoxLayout()
         
+        # command layout 
+        ## fetch message button
         commandlayout=QVBoxLayout()
         self.fetch_button = QPushButton('Fetch Message')
         self.fetch_button.setFixedSize(170, 50)
         commandlayout.addWidget(self.fetch_button)
         self.fetch_button.clicked.connect(self.fetch_message)
         
+        ## Drone following enable button
         self.following = QPushButton('Drone following start')
         self.following.setFixedSize(170, 50)
         commandlayout.addWidget(self.following)
         self.following.clicked.connect(self.following_start)
         
+        ## Tracking enable button
         self.track = QPushButton('Tracking start')
         self.track.setFixedSize(170, 50)
         commandlayout.addWidget(self.track)
         self.track.clicked.connect(self.track_start)
         
+         ## Publish ID button
         input_widget= QFrame()
         input_widget.setFrameStyle(QFrame.Box)
         input_layout=QVBoxLayout()
@@ -86,70 +107,93 @@ class FollowWindow(QWidget):
         self.id_input = QLineEdit()
         self.id_input.setFixedSize(150, 30)
         input_layout.addWidget(self.id_input)
-
         self.id_button = QPushButton('Publish ID')
         self.id_button.setFixedSize(150, 50)
         input_layout.addWidget(self.id_button)
         input_widget.setLayout(input_layout)
-        
         commandlayout.addWidget(input_widget)
+
+        ## Record data button
+        self.record_button = QPushButton('Record data')
+        self.record_button.setFixedSize(170, 50)
+        commandlayout.addWidget(self.record_button)
+        self.record_button.clicked.connect(self.record_start)
+        self.record_init = True
         
+        ## Command Status Box
         command_status=QFrame()
-        
         command_status.setFrameStyle(QFrame.Box)
         status_layout=QVBoxLayout()
         command_statuslabel=QLabel("Command status:")
         self.commandlabel=QLabel("Initialized completed")
-        command_status.setFixedHeight(150)
+        command_status.setFixedHeight(100)
         status_layout.addWidget(command_statuslabel)
         status_layout.addWidget(self.commandlabel)
+        status_layout.addStretch()
         command_status.setLayout(status_layout)
-       
         commandlayout.addWidget(command_status)
         self.id_button.clicked.connect(self.publish_id)
-
         commandlayout.addStretch()
-        
+
+        #Content Layout
         contentlayout = QVBoxLayout()
+
+        # Messge windows
         self.message =MessageLayout()
         contentlayout.addWidget(self.message)
 
-
         allimage=QHBoxLayout()
+        
+        # Image show windows
         self.image = ImageShowLayout()
-        # Create a layout and add widgets for the video play 
+
+        # PID deviation image 
         self.PIDcontroller=PIDContorllerImage()
-
-
-        # Set up the central widget
 
         allimage.addWidget(self.image)
         allimage.addWidget(self.PIDcontroller)
         contentlayout.addLayout(allimage)
-
         layout.addLayout(commandlayout)
         layout.addLayout(contentlayout)
         self.setLayout(layout)
 
-    def update_command_label(self,str):
-        self.commandlabel.setText(str)
-        self.commandlabel.adjustSize()
-
-    def fetch_message(self):
-        if self.timer.isActive():
-            self.timer.stop()
-            self.fetch_button.setText('Start')
-            self.update_command_label("Stop fetching ")
-        else:
-            self.timer.start(100)
-            self.fetch_button.setText('Stop')
-            self.update_command_label(f"Start fetching ros \n message ")
-        
-
-    # message page 
     def timer_callback(self):
         rclpy.spin_once(self.node, timeout_sec=0.1)
 
+    #update  the command label 
+    def update_command_label(self,str):
+        self.commandlabel.setText(str)
+        self.commandlabel.adjustSize()
+    
+    # buttom click function 
+    def fetch_message(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.fetch_button.setText('Start to fetch data')
+            self.update_command_label("Stop fetching ")
+        else:
+            self.timer.start(100)
+            self.fetch_button.setText('Stop to fetch data')
+            self.update_command_label(f"Start fetching ros \n message ")
+    
+    def record_start(self):
+        if self.record_init:
+            self.record_init=False
+            self.record_button.setStyleSheet("background-color: red")
+            self.record_button.setText('Stop to record data')
+            self.update_command_label(f'Start recording the \n data')
+        else:  
+            self.record_init=True
+            self.record_button.setText('Start to record data')
+            self.record_button.setStyleSheet("background-color: white")
+            self.filename+=1
+            self.video_init= True
+            self.video_num=0
+            self.update_command_label(f'Stop recording the \n data')
+            self.out.release()
+
+            pass 
+         
     def following_start(self):
         msg = Bool()
         msg.data = True
@@ -174,7 +218,46 @@ class FollowWindow(QWidget):
             self.update_command_label(f'Published ID: {id_info}')
             print(f'Published ID: {id_info}')    
         except:
-            pass    
+            pass   
+
+    # ros callback function
+    def video_callback(self, msg):
+        if self.record_init: 
+            return
+        try:
+            # Convert the ROS Image message to a CV2 image
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except CvBridgeError as e:
+            self.get_logger().error(f'Error converting ROS Image to OpenCV: {e}')
+            return
+
+        self.video_num+=1
+        cap=cv_image
+        width = cv_image.shape[1]    # 取得影像寬度
+        height = cv_image.shape[0]   # 取得影像高度
+           # 取得影像FPS
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # 建立儲存影片的物件
+        
+        if self.video_init:
+            self.out = cv2.VideoWriter(f'output{self.filename}.mp4', fourcc, self.fps, (width,  height))
+            self.video_init=False
+            print ("start video")
+        # Display the resulting frame   
+
+      
+        self.out.write(cap)     # 將取得的每一幀圖像寫入空的影片
+        #cv2.imshow("frame",cap)
+        #cv2.waitKey(1)
+        if self.video_num > self.fps*200:  # 每200秒存一次
+            self.video_num=0
+            self.filename+=1
+            self.video_data=[]
+            self.yolo_data=[]
+            self.botsort_data=[]
+            self.out = cv2.VideoWriter(f'output{self.filename}.mp4', fourcc, self.fps, (width,  height))
+            print ("change video")
+            time.sleep(1)
+        pass
 
     def image_callback(self, msg):
         self.image.frame = msg
@@ -190,6 +273,8 @@ class FollowWindow(QWidget):
                 heading: {msg.heading},
             ''')
             self.message.update_label('/object_detection/target_gps', self.sendmsg)
+        if not self.record_init:
+            self.record_object_data(msg)
 
     def gps_mavlink_callback(self, msg):
         if self.message.topic[self.message.page_count] == 'avix_mavros/state':
@@ -205,6 +290,8 @@ class FollowWindow(QWidget):
                 pitch: {msg.pitch},
             ''')
             self.message.update_label('avix_mavros/state', self.sendmsg)
+        if not self.record_init:
+            self.record_avix_data(msg)
 
     def follow_command_callback(self, msg):
         if self.message.topic[self.message.page_count] == '/avix_mavros/follow_command':
@@ -217,14 +304,6 @@ class FollowWindow(QWidget):
                 estimate_source: {msg.estimate_source},
             ''')
             self.message.update_label('/avix_mavros/follow_command', self.sendmsg)
-
-    # def detections_callback(self, msg):
-    #     if self.message.topic[self.message.page_count] == '/object_detection/detections':
-    #         self.sendmsg = (f'''
-    #             detections: {msg.detections},
-    #             num_detections: {msg.num_detections},
-    #         ''')
-    #         self.message.update_label('/object_detection/detections', self.sendmsg)
 
     def controlGimbal(self, msg):
         if self.message.topic[self.message.page_count] == '/ktg_gimbal/control':
@@ -277,7 +356,78 @@ class FollowWindow(QWidget):
                 eo_zoom: {msg.eo_zoom},
             ''')
             self.message.update_label('/gimbal/info', self.sendmsg)
+        if  not self.record_init:
+            self.record_gimbal_data(msg)
 
+    #record the data
+    def record_gimbal_data(self,msg):
+        objects_data3=[]
+        video_time = self.video_num/self.fps
+        objects_data3.append(self.timestamp)
+        objects_data3.append(video_time)
+        objects_data3.append(msg.pitch_angle)
+        objects_data3.append(msg.yaw_angle)
+        objects_data3.append(msg.target_distance)
+        objects_data3.append(msg.ranging_flag)
+        objects_data3.append(msg.eo_zoom)
+        
+        self.gimbal_data.append(objects_data3)
+       
+        if len(self.gimbal_data)>0:
+            self.gimbal_df=pd.DataFrame(self.gimbal_data , columns=[ "timestamp","video time", "pitch_angle","yaw_angle","target_distance" ,"ranging_flag", "eo_zoom"])
+            self.gimbal_df.to_csv(f"gimbal{self.filename}.csv", index=False)
+            #print("save")
+
+    def record_avix_data(self, msg ):
+        objects_data1=[]
+        
+        self.timestamp+=1
+        video_time = self.video_num/self.fps
+        objects_data1.append(self.timestamp)
+        objects_data1.append(video_time)
+        objects_data1.append(msg.latitude)
+        objects_data1.append(msg.longitude)
+        objects_data1.append(msg.altitude)
+        objects_data1.append(msg.relative_altitude)
+        objects_data1.append(msg.heading)
+        objects_data1.append(msg.flight_mode)
+        objects_data1.append(msg.roll)
+        objects_data1.append(msg.yaw)
+        objects_data1.append(msg.pitch)
+        
+        
+        self.avix_data.append(objects_data1)
+       
+        if len(self.avix_data)>0:
+            self.avix_df=pd.DataFrame(self.avix_data , columns=[ "timestamp","video time ","latitude","longitude","altitude" ,"relative_altitude","heading","flight_mode" , "roll","yaw","pitch" ])
+            self.avix_df.to_csv(f"avix{self.filename}.csv", index=False)
+            #print("save")
+
+    def record_object_data(self, msg):
+        objects_data2=[]
+    
+        video_time = self.video_num/self.fps
+        objects_data2.append(self.timestamp)
+        objects_data2.append(video_time)
+        objects_data2.append(msg.target_latitude)
+        objects_data2.append(msg.target_longitude)
+        objects_data2.append(msg.target_altitude)
+        objects_data2.append(msg.estimate_status)
+        objects_data2.append(msg.estimate_source)
+        objects_data2.append(msg.heading)
+        objects_data2.append(msg.delta_north)
+        objects_data2.append(msg.delta_east)
+        
+        self.target_data.append(objects_data2)
+
+        time.sleep(0.5)
+       
+        if len(self.target_data)>0:
+            self.target_df=pd.DataFrame(self.target_data , columns=[ "timestamp", "video time ", "target_latitude","target_longitude","target_altitude" ,"estimate_status", "estimate_source","heading","delta_north", "delta_east"])
+            self.target_df.to_csv(f"target{self.filename}.csv", index=False)
+            #print("save")
+
+    #close windows
     def closeEvent(self, event):
         #self.cap.release()
         self.timer.stop()
@@ -492,7 +642,7 @@ class PIDContorllerImage(QWidget):
         self.ax.set_xlabel('Time')
         self.ax.set_ylabel('Value')
         plt.legend(['x', 'y'], loc='upper left')
-        self.ax.set_title('Real-Time  Deviation Data Plot')
+        self.ax.set_title('Real-Time Deviation Data Plot')
         self.canvas.draw()
     def update_data(self,x,y):
         self.x=x
@@ -526,10 +676,6 @@ class PIDContorllerImage(QWidget):
         self.t_data=[]
         self.x_data = []
         self.y_data = []
-
-
-    
-    
 
 
 def main(args=None):
