@@ -9,6 +9,9 @@ from std_msgs.msg import String ,Bool , Int32
 from sensor_msgs.msg import Image
 from avix_utils.msg import MQ3State, GimbalInfo ,TrackingUpdate , InfInfo ,GimbalControl, MavlinkInfo, ObjectDetections,  FollowCommand, TargetGPS 
 from avix_utils import avix_common
+from avix_utils.srv import EnableFunction,  ObjectDetectionStatus, DroneFollowingStatus, GimbalTrackingStatus
+from avix_utils.avix_error_codes import get_error_message
+from avix_utils.avix_enums import ErrorMode
 
 import pandas as pd 
 
@@ -46,16 +49,24 @@ class FollowWindow(QWidget):
         
         #  create image show 
         #TODO : use the detection to draw the frame
-        #self.image_subscriber = self.node.create_subscription(Image, '/for_qt5', self.image_callback, 10)
+        self.image_subscriber = self.node.create_subscription(Image, avix_common.KTG_EO_IMG, self.image_callback, 10)
         self.image_subscriber = self.node.create_subscription(Image,avix_common.KTG_EO_IMG , self.video_callback, 10)
 
         #create the publisher 
-        self.follow_publisher = self.node.create_publisher(Bool, '/mq3/start_following', 10)
-        self.track_start_publisher = self.node.create_publisher(Bool, '/icp_interface/tracking_cmd', 10)
-        self.id_publisher = self.node.create_publisher(Int32, '/icp_interface/following_cmd', 10)
+        #self.follow_publisher = self.node.create_publisher(Bool, '/mq3/start_following', 10)
+        #self.track_start_publisher = self.node.create_publisher(Bool, '/icp_interface/tracking_cmd', 10)
+        #self.id_publisher = self.node.create_publisher(Int32, '/icp_interface/following_cmd', 10)
         
+
         self.mq3_status_publisher = self.node.create_publisher(MQ3State, avix_common.MQ3_STATUS, 10)
-        # self.id_publisher = self.node.create_publisher(Int32, avix_common.ICP_TARGET_ID_CMD, 10)
+        self.id_publisher = self.node.create_publisher(Int32, avix_common.ICP_TARGET_ID_CMD, 10)
+
+        ##change to client
+        self.cli_object_detection_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_OBJECT_DETECTION_SRV)
+        self.cli_gimbal_tracking_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_GIMBAL_TRACKING_SRV)
+        self.cli_drone_following_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_DRONE_FOLLOWING_SRV)
+
+
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.timer_callback)
@@ -77,6 +88,24 @@ class FollowWindow(QWidget):
         self.filename=1
         self.video_init= True
         self.timestamp=0
+        self.wait_for_services()
+        print('All service are ready. MQ3 bringup success')
+        
+
+    def wait_for_services(self):
+        while not self.cli_object_detection_enable.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('[Object Detection Enabling] Service not available, waiting again... Please boot it up if have not!')
+            #time.sleep(0.5)
+        
+        while not self.cli_drone_following_enable.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('[Drone Following Enabling] Service not available, waiting again... Please boot it up if have not!')
+            #time.sleep(0.5)
+
+        
+        while not self.cli_gimbal_tracking_enable.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('[Gimbal Tracking Enabling] Service not available, waiting again... Please boot it up if have not!')
+            #time.sleep(0.5)
+
 
     #UI interface layout
     def init_ui(self):
@@ -202,28 +231,38 @@ class FollowWindow(QWidget):
             pass 
          
     def following_start(self):
-        msg = Bool()
-        msg.data = True
-        self.follow_publisher.publish(msg)
-        self.update_command_label(f'Following: {msg.data}')
-        print(f'Following: {msg.data}')
+        # msg = Bool()
+        # msg.data = True
+        # self.follow_publisher.publish(msg)
+        # self.update_command_label(f'Following: {msg.data}')
+        # print(f'Following: {msg.data}')
 
-        self.mq3_status_publisher.publish(MQ3State(following_enabled=True))
+        # self.mq3_status_publisher.publish(MQ3State(following_enabled=True))
+        # self.update_command_label(f'Following: True')
+        # print(f'Following: True') 
+        temp_request = EnableFunction.Request()
+        temp_request.enable = True
+        future = self.cli_drone_following_enable.call_async(temp_request)
         self.update_command_label(f'Following: True')
-        # print(f'Following: True')   
+        print(f'Following: True') 
+
      
     def track_start(self):
-        msg = Bool()
-        msg.data = True
-        self.track_start_publisher.publish(msg)
-        self.mq3_status_publisher.publish(MQ3State(tracking_enabled=True, detection_enabled=True))
+        # msg = Bool()
+        # msg.data = True
+        # self.track_start_publisher.publish(msg)
+        # self.mq3_status_publisher.publish(MQ3State(tracking_enabled=True, detection_enabled=True))
+        temp_request = EnableFunction.Request()
+        temp_request.enable = True
+        future = self.cli_object_detection_enable.call_async(temp_request)
+        future = self.cli_gimbal_tracking_enable.call_async(temp_request)
         self.update_command_label(f'Tracking: True')
         print(f'Tracking: True')   
 
     def publish_id(self):
         try:
             id_info = int(self.id_input.text())
-            print(type(id_info))
+
             msg = Int32()
             msg.data = id_info %128
             self.id_publisher.publish(msg)
