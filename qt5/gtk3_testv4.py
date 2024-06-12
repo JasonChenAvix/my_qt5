@@ -624,7 +624,15 @@ class ImageShowLayout(QWidget):
         if self.frame is not None:
             # Convert the frame to RGB
             frame = self.bridge.imgmsg_to_cv2(self.frame, 'bgr8')
+            height, width = frame.shape[:2]
+            if width != 640 or height != 480:
+                # resize the image
+                print(
+                f"Received image of dimensions ({width}, {height}), which does not match expected dimensions ({640}, {480}). Resizing image.")
+                frame = cv2.resize(frame, (640, 480))
+
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
 
             # Convert the frame to QImage
             
