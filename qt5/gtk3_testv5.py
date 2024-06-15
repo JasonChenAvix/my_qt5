@@ -1,7 +1,7 @@
 import sys
 import rclpy
-from PyQt5.QtWidgets import QFrame,QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit ,QCheckBox ,QHBoxLayout,QMainWindow , QStackedWidget, QSizePolicy, QShortcut
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import QGridLayout, QFrame,QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit ,QCheckBox ,QHBoxLayout,QMainWindow , QStackedWidget, QSizePolicy, QShortcut
+from PyQt5.QtGui import QKeySequence ,QIcon
 from PyQt5.QtCore import Qt, QTimer
 from rclpy import init, shutdown
 from rclpy.node import Node
@@ -12,6 +12,9 @@ from avix_utils import avix_common
 from avix_utils.srv import EnableFunction,  ObjectDetectionStatus, DroneFollowingStatus, GimbalTrackingStatus
 from avix_utils.avix_error_codes import get_error_message
 from avix_utils.avix_enums import ErrorMode
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup ,ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+
 
 import pandas as pd 
 
@@ -43,6 +46,7 @@ rtsp_url = "mot4.mp4"
 
 
 
+
 class FollowWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -55,11 +59,10 @@ class FollowWindow(QWidget):
         self.node.create_subscription(MavlinkInfo, avix_common.MAVLINK_INFO, self.gps_mavlink_callback, 10)
         self.node.create_subscription(InfInfo, avix_common.INF_INFO, self.gps_inf_callback, 10)
         self.node.create_subscription(GimbalControl, avix_common.KTG_CONTROL, self.controlGimbal, 10)
-        self.node.create_subscription(FollowCommand, avix_common.MAVLINK_FOLLOW_CMD, self.follow_command_callback, 10)
-        
+        self.node.create_subscription(FollowCommand, avix_common.MAVLINK_FOLLOW_CMD, self.follow_command_callback, 10)     
         
         #  create image show 
-        #TODO : use the detection to draw the frame
+        #TODO: make two subscriber into one 
         self.image_subscriber = self.node.create_subscription(Image, avix_common.KTG_EO_IMG, self.image_callback, 10)
         self.image_subscriber = self.node.create_subscription(Image,avix_common.KTG_EO_IMG , self.video_callback, 10)
 
@@ -71,13 +74,12 @@ class FollowWindow(QWidget):
 
         self.mq3_status_publisher = self.node.create_publisher(MQ3State, avix_common.MQ3_STATUS, 10)
         self.id_publisher = self.node.create_publisher(Int32, avix_common.ICP_TARGET_ID_CMD, 10)
+        self.control_publisher = self.node.create_publisher(GimbalControl, avix_common.KTG_CONTROL, 10)
 
         ##change to client
         self.cli_object_detection_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_OBJECT_DETECTION_SRV)
         self.cli_gimbal_tracking_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_GIMBAL_TRACKING_SRV)
         self.cli_drone_following_enable = self.node.create_client(EnableFunction, avix_common.MQ3_ENABLE_DRONE_FOLLOWING_SRV)
-
-
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.timer_callback)
@@ -100,6 +102,9 @@ class FollowWindow(QWidget):
         self.video_init= True
         self.timestamp=0
         self.wait_for_services()
+        # create the mutli thread executor
+        self.executor = MultiThreadedExecutor()
+        self.executor.add_node(self.node)
         print('All service are ready. MQ3 service success')
 
     def wait_for_services(self):
@@ -119,6 +124,7 @@ class FollowWindow(QWidget):
     #UI interface layout
     def init_ui(self):
         self.setWindowTitle('AVIX Detection System V1.0.1')
+        self.setGeometry(100, 100, 600, 600)
         
         layout=QHBoxLayout()
         
@@ -135,16 +141,19 @@ class FollowWindow(QWidget):
         self.following.setFixedSize(170, 50)
         commandlayout.addWidget(self.following)
         self.following.clicked.connect(self.following_start)
+        self.follow_init = False
         
         ## Tracking enable button
         self.track = QPushButton('Tracking start')
         self.track.setFixedSize(170, 50)
         commandlayout.addWidget(self.track)
         self.track.clicked.connect(self.track_start)
+        self.track_init = False
         
          ## Publish ID button
         input_widget= QFrame()
         input_widget.setFrameStyle(QFrame.Box)
+        input_widget.setFixedWidth(170)
         input_layout=QVBoxLayout()
         input_label= QLabel('Input the tracking id:')
         input_layout.addWidget(input_label)
@@ -166,19 +175,42 @@ class FollowWindow(QWidget):
         self.record_init = True
         
         ## Command Status Box
-        command_status=QFrame()
-        command_status.setFrameStyle(QFrame.Box)
-        status_layout=QVBoxLayout()
-        command_statuslabel=QLabel("Command status:")
-        self.commandlabel=QLabel("Initialized completed")
-        command_status.setFixedHeight(100)
-        status_layout.addWidget(command_statuslabel)
-        status_layout.addWidget(self.commandlabel)
-        status_layout.addStretch()
-        command_status.setLayout(status_layout)
-        commandlayout.addWidget(command_status)
-        
+        # 创建文本框
+        self.textbox = QTextEdit(self)
+        self.textbox.setFixedSize(170, 300)
+        self.textbox.setReadOnly(True)  # 设置文本框为只读
+        self.textbox.setPlaceholderText('Waiting for command...')
+        commandlayout.addWidget(self.textbox)
+
+
         commandlayout.addStretch()
+        # Create a grid layout for the arrow buttons
+        grid = QGridLayout()
+
+        # Button and their positions in the grid
+        path = '/home/nvidia/avix/arrow_icon/'
+        buttons = {
+            (0, 1): ("up", path+"up.png"),
+            (1, 0): ("left", path+"left.png"),
+            (1, 1): ("center", path+"center.png"),
+            (1, 2): ("right", path+"right.png"),
+            (2, 1): ("down", path+"down.png"),
+            (0, 0): ("left-up", path+"left_up.png"),
+            (0, 2): ("right-up", path+"right_up.png"),
+            (2, 0): ("left-down", path+"left_down.png"),
+            (2, 2): ("right-down", path+"right_down.png")
+        }
+
+        # Create buttons and place them in the grid
+        for position, (name, icon) in buttons.items():
+            button = QPushButton()
+            button.setIcon(QIcon(icon))
+            button.setIconSize(button.sizeHint())
+            button.clicked.connect(lambda _, name=name: self.control_clicked(name))
+            grid.addWidget(button, *position)
+
+        commandlayout.addLayout(grid)
+        self.set_center=False
 
         #Content Layout
         contentlayout = QVBoxLayout()
@@ -203,14 +235,80 @@ class FollowWindow(QWidget):
         self.setLayout(layout)
 
     def timer_callback(self):
-        rclpy.spin_once(self.node, timeout_sec=0.1)
+        #rclpy.spin_once(self.node, timeout_sec=0.1)
+        self.executor.spin_once( timeout_sec=0.1 )
 
     #update  the command label 
     def update_command_label(self,str):
-        self.commandlabel.setText(str)
-        self.commandlabel.adjustSize()
+         # 按钮点击事件处理函数，记录按钮点击的历史
+        current_text = self.textbox.toPlainText()
+        new_text = str
+        self.textbox.setPlainText(new_text + '\n'+'-----'+'\n' + current_text )
     
     # buttom click function 
+    def control_clicked(self, name):
+        if name == 'up':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(0.0)
+            control_msg.tilt_velocity = float(2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('up')
+        elif name == 'down':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(0.0)
+            control_msg.tilt_velocity = float(-2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('down')
+        elif name == 'left':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(-2000.0)
+            control_msg.tilt_velocity = float(0.0)
+
+            self.control_publisher.publish(control_msg)
+            print('left')
+        elif name == 'right':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(2000.0)
+            control_msg.tilt_velocity = float(0.0)
+
+            self.control_publisher.publish(control_msg)
+            print('right')
+        elif name == 'left-up':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(-2000.0)
+            control_msg.tilt_velocity = float(2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('left-up')
+        elif name == 'left-down':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(-2000.0)
+            control_msg.tilt_velocity = float(-2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('left-down')
+        elif name == 'right-up':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(2000.0)
+            control_msg.tilt_velocity = float(2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('right-up')
+        elif name == 'right-down':
+            control_msg = GimbalControl()
+            control_msg.pan_velocity = float(2000.0)
+            control_msg.tilt_velocity = float(-2000.0)
+
+            self.control_publisher.publish(control_msg)
+            print('right-down')
+        elif name == 'center':
+            pass # do nothing
+            #TODO: move to center
+            self.set_center=True
+           
+
     def fetch_message(self):
         if self.timer.isActive():
             self.timer.stop()
@@ -249,25 +347,57 @@ class FollowWindow(QWidget):
         # self.mq3_status_publisher.publish(MQ3State(following_enabled=True))
         # self.update_command_label(f'Following: True')
         # print(f'Following: True') 
-        temp_request = EnableFunction.Request()
-        temp_request.enable = True
-        future = self.cli_drone_following_enable.call_async(temp_request)
-        self.update_command_label(f'Following: True')
-        print(f'Following: True') 
+        if not self.follow_init:
+            temp_request = EnableFunction.Request()
+            temp_request.enable = True
+            future = self.cli_drone_following_enable.call_async(temp_request)
+            self.update_command_label(f'Following: True')
+            print(f'Following: True') 
+            self.follow_init = True
+        else:
+            temp_request = EnableFunction.Request()
+            temp_request.enable = False
+            future = self.cli_drone_following_enable.call_async(temp_request)
+            self.update_command_label(f'Following: False')
+            print(f'Following: False')
+            self.follow_init = False
      
     def track_start(self):
         # msg = Bool()
         # msg.data = True
         # self.track_start_publisher.publish(msg)
         # self.mq3_status_publisher.publish(MQ3State(tracking_enabled=True, detection_enabled=True))
-        temp_request = EnableFunction.Request()
-        temp_request.enable = True
-        future = self.cli_object_detection_enable.call_async(temp_request)
-        time.sleep(0.5)
-        future = self.cli_gimbal_tracking_enable.call_async(temp_request)
-        
-        self.update_command_label(f'Tracking: True')
-        print(f'Tracking: True')   
+        if not self.track_init:
+            temp_request = EnableFunction.Request()
+            temp_request.enable = True
+            future = self.cli_gimbal_tracking_enable.call_async(temp_request)
+            self.executor.spin_until_future_complete(future)
+            future_check_response = future.result()
+            print(future_check_response)
+
+            future1 = self.cli_object_detection_enable.call_async(temp_request)
+            self.executor.spin_until_future_complete(future1)
+            future1_check_response = future1.result()
+            print(future1_check_response)
+            self.update_command_label(f'Tracking: True')
+            print(f'Tracking: True') 
+            self.track_init = True
+
+        else:
+            temp_request = EnableFunction.Request()
+            temp_request.enable = False
+            future = self.cli_gimbal_tracking_enable.call_async(temp_request)
+            self.executor.spin_until_future_complete(future)
+            future_check_response = future.result()
+            print(future_check_response)
+            future1= self.cli_object_detection_enable.call_async(temp_request)
+            self.executor.spin_until_future_complete(future1)
+            future1_check_response = future1.result()
+            print(future1_check_response)
+            self.update_command_label(f'Tracking: False')
+            print(f'Tracking: False')
+            self.track_init = False
+            self.image.detection_init=False
 
     def publish_id(self):
         try:
@@ -389,6 +519,29 @@ class FollowWindow(QWidget):
             self.message.update_label(avix_common.OBJECT_DETECTIONS,  self.sendmsg) 
     
     def gimbal_callback(self, msg):
+        # save for the control gimbal to center
+        if self.set_center:
+            self.pitch_angle = msg.pitch_angle
+            self.yaw_angle = msg.yaw_angle
+            self.roll_angle = msg.roll_angle
+            control_msg = GimbalControl()
+            if abs(msg.pitch_angle) > 5 :
+                if msg.pitch_angle > 0:
+                    control_msg.tilt_velocity = float(-2000.0)
+                else:
+                    control_msg.tilt_velocity = float(2000.0)
+            if abs(msg.yaw_angle) > 5:
+                if msg.yaw_angle > 0:
+                    control_msg.pan_velocity = float(-2000.0)
+                else:
+                    control_msg.pan_velocity = float(2000.0)
+            else:
+                self.set_center = False
+
+            self.control_publisher.publish(control_msg)
+
+                
+
         if self.message.topic[self.message.page_count] == avix_common.KTG_INFO:
             self.sendmsg = (f'''
                 pitch_angle: {msg.pitch_angle},
@@ -515,7 +668,6 @@ class MessageLayout(QWidget):
             self.labels[topic] = label
             self.stacked_widget.addWidget(label)
         
-        self.label.setFixedSize(170, 50)
 
         # Create buttons to switch between pages
         Hbox=QHBoxLayout()
@@ -632,9 +784,11 @@ class ImageShowLayout(QWidget):
             height, width = frame.shape[:2]
             if self.detection_init:
                 frame = self.plot_annotator(self.detections, frame)
+            else:
+                frame = self.plot_annotator(None, frame)
             if width != 640 or height != 480:
                 # resize the image
-                print(f"Received image of dimensions ({width}, {height}), which does not match expected dimensions ({640}, {480}). Resizing image.")
+                #print(f"Received image of dimensions ({width}, {height}), which does not match expected dimensions ({640}, {480}). Resizing image.")
                 frame = cv2.resize(frame, (640, 480))
             
 
@@ -653,6 +807,8 @@ class ImageShowLayout(QWidget):
             self.videoLabel.setPixmap(QPixmap.fromImage(q_image))
 
     def plot_annotator(self, detection, frame):
+        if detection is None:
+            return frame
         annotator = Annotator(
         deepcopy(frame),
             line_width,
