@@ -101,7 +101,7 @@ class FollowWindow(QWidget):
         self.filename=1
         self.video_init= True
         self.timestamp=0
-        self.wait_for_services()
+        #self.wait_for_services()
         # create the mutli thread executor
         self.executor = MultiThreadedExecutor()
         self.executor.add_node(self.node)
@@ -116,7 +116,6 @@ class FollowWindow(QWidget):
             print('[Drone Following Enabling] Service not available, waiting again... Please boot it up if have not!')
             #time.sleep(0.5)
 
-        
         while not self.cli_gimbal_tracking_enable.wait_for_service(timeout_sec=3.0):
             print('[Gimbal Tracking Enabling] Service not available, waiting again... Please boot it up if have not!')
             #time.sleep(0.5)
@@ -308,7 +307,6 @@ class FollowWindow(QWidget):
             #TODO: move to center
             self.set_center=True
            
-
     def fetch_message(self):
         if self.timer.isActive():
             self.timer.stop()
@@ -367,6 +365,9 @@ class FollowWindow(QWidget):
         # msg.data = True
         # self.track_start_publisher.publish(msg)
         # self.mq3_status_publisher.publish(MQ3State(tracking_enabled=True, detection_enabled=True))
+        if  not self.cli_object_detection_enable.wait_for_service(timeout_sec=1.0):
+            return
+
         if not self.track_init:
             temp_request = EnableFunction.Request()
             temp_request.enable = True
@@ -539,9 +540,7 @@ class FollowWindow(QWidget):
                 self.set_center = False
 
             self.control_publisher.publish(control_msg)
-
-                
-
+        
         if self.message.topic[self.message.page_count] == avix_common.KTG_INFO:
             self.sendmsg = (f'''
                 pitch_angle: {msg.pitch_angle},
